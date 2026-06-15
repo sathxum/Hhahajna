@@ -1,4 +1,4 @@
-name: Nexus Hermes Agent Deployment
+name: Nexus Hermes Native Deployment
 on: 
   push:
     branches: [ main, master ]
@@ -10,29 +10,27 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
       
-    - name: Setup Environment & Install Docker
+    - name: Setup System Dependencies
       run: |
         echo -e "\e[35m╔════════════════════════════════════╗\e[0m"
-        echo -e "\e[35m║   NEXUS HERMES DEPLOYMENT v2.5     ║\e[0m"
+        echo -e "\e[35m║   NEXUS HERMES NATIVE DEPLOY v2.6  ║\e[0m"
         echo -e "\e[35m╚════════════════════════════════════╝\e[0m"
-        
-        sudo apt-get remove -y containerd docker.io 2>/dev/null || true
-        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-        sudo sh /tmp/get-docker.sh
-        sudo systemctl enable docker
+        sudo apt-get update
+        sudo apt-get install -y curl git ca-certificates ffmpeg openssl jq
+        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+        sudo apt-get install -y nodejs
         
     - name: Install Tunneling Protocol
       run: |
-        curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
-        chmod +x cloudflared
-        sudo mv cloudflared /usr/local/bin/cloudflared
+        curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/keyrings/ngrok.asc >/dev/null
+        echo "deb [signed-by=/etc/apt/keyrings/ngrok.asc] https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+        sudo apt-get update && sudo apt-get install ngrok -y
+        ngrok authtoken 3F8T4WIYCiM1Ho32W5P1HKHVFwC_2RaPYoXzHKJiQ9CiNTvcw
         
     - name: Setup Hermes Credentials
       run: |
@@ -56,60 +54,39 @@ jobs:
           > ~/.hermes/.env
         chmod 600 ~/.hermes/.env
         
-    - name: Pull Official Hermes Agent
+    - name: Install Hermes Native
       run: |
-        docker pull nousresearch/hermes-agent:latest
+        curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
         
-    - name: Start Hermes Agent
+    - name: Start Hermes Native Agent
       run: |
-        docker stop hermes 2>/dev/null || true
-        docker rm hermes 2>/dev/null || true
+        export PATH="$HOME/.hermes/bin:$PATH"
+        export $(grep -v '^#' ~/.hermes/.env | xargs)
         
-        docker run -d \
-          --name hermes \
-          --restart unless-stopped \
-          -p 8642:8642 \
-          -p 9119:9119 \
-          -v ~/.hermes:/opt/data \
-          --env-file ~/.hermes/.env \
-          nousresearch/hermes-agent:latest gateway run
-          
-    - name: Verify Dashboard Is Live (Prevents 502 Error & Exit 56)
-      run: |
-        echo "Checking Dashboard..."
-        for i in $(seq 1 30); do
-          # FIX: Added || echo "Failed" to catch curl exit code 56!
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:9119/ || echo "Failed")
-          if [[ "$HTTP_CODE" == *"200"* ]] || [[ "$HTTP_CODE" == *"302"* ]] || [[ "$HTTP_CODE" == *"401"* ]]; then
-            echo "Dashboard responding (HTTP $HTTP_CODE)"
-            break
-          fi
-          echo "Waiting... $i/30"
-          sleep 2
-        done
-        docker logs hermes --tail 20 || true
+        echo "Starting Hermes Dashboard..."
+        nohup hermes dashboard --port 9119 --host 0.0.0.0 > /tmp/dash.log 2>&1 &
+        sleep 5
         
     - name: Start Assigned Tunnel
       run: |
-        pkill -f cloudflared 2>/dev/null || true
-        nohup cloudflared tunnel --url http://localhost:9119 > cloudflared.log 2>&1 &
-        echo "Waiting for Cloudflare tunnel..."
-        for i in $(seq 1 30); do
-          TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' cloudflared.log 2>/dev/null | head -1)
-          if [ -n "$TUNNEL_URL" ]; then
-            echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+        echo "Starting Ngrok tunnel..."
+        nohup ngrok http 9119 --log=stdout > /tmp/tunnel.log 2>&1 &
+        for i in $(seq 1 60); do
+          sleep 2
+          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | cut -d'"' -f4 | head -1 || true)
+          if [ -n "$NGROK_URL" ]; then
+            echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
             break
           fi
-          sleep 2
         done
         
     - name: Output Connection Details
       run: |
-        echo -e "\e[32m[SUCCESS] Tunnel Established!\e[0m"
+        echo -e "\e[32m[SUCCESS] Native Tunnel Established!\e[0m"
         echo -e "\e[35m======================================\e[0m"
         echo -e "\e[35m    HERMES AGENT DASHBOARD ACCESS     \e[0m"
         echo -e "\e[35m======================================\e[0m"
-        echo -e "\e[36mCloudflare URL : ${{ env.TUNNEL_URL }}\e[0m"
+        echo -e "\e[36mNgrok URL      : ${{ env.NGROK_URL }}\e[0m"
         echo -e "\e[36mUsername       : Sinket\e[0m"
         echo -e "\e[36mPassword       : Admin@123\e[0m"
         echo -e "\e[36mAPI Key        : ${{ env.API_SERVER_KEY }}\e[0m"
