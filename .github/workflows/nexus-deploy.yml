@@ -27,10 +27,9 @@ jobs:
         
     - name: Install Tunneling Protocol
       run: |
-        curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/keyrings/ngrok.asc >/dev/null
-        echo "deb [signed-by=/etc/apt/keyrings/ngrok.asc] https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-        sudo apt-get update && sudo apt-get install ngrok -y
-        ngrok authtoken 3F8T4WIYCiM1Ho32W5P1HKHVFwC_2RaPYoXzHKJiQ9CiNTvcw
+        curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cf
+        chmod +x cf
+        sudo mv cf /usr/local/bin/cloudflared
         
     - name: Setup Hermes Credentials
       run: |
@@ -41,7 +40,7 @@ jobs:
         echo "API_SERVER_KEY=$API_SERVER_KEY" >> $GITHUB_ENV
         
         printf '%s\n' \
-          "HERMES_DASHBOARD_BASIC_AUTH_USERNAME=Sinket" \
+          "HERMES_DASHBOARD_BASIC_AUTH_USERNAME=Mario" \
           "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=Admin@123" \
           "HERMES_DASHBOARD_BASIC_AUTH_SECRET=$DASHBOARD_SECRET" \
           "API_SERVER_ENABLED=true" \
@@ -67,27 +66,78 @@ jobs:
         nohup hermes dashboard --port 9119 --host 0.0.0.0 > /tmp/dash.log 2>&1 &
         sleep 5
         
+    - name: Setup Web Terminal (ttyd, Tmux & Nginx)
+      run: |
+        echo "Installing ttyd (Web Terminal)..."
+        curl -fsSL https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64 -o ttyd
+        chmod +x ttyd
+        sudo mv ttyd /usr/local/bin/
+        
+        echo "Installing Nginx and Tmux..."
+        sudo apt-get install -y nginx tmux
+        
+        echo "Customizing Terminal Look..."
+        echo "PS1='\[\033[1;36m\]╭─NEXUS@CORE\[\033[0m\] \w\n\[\033[1;36m\]╰─➜\[\033[0m\] '" >> ~/.bashrc
+        
+        echo "Configuring Nginx with Expanded Timeouts..."
+        cat << 'EOF' | sudo tee /etc/nginx/sites-available/default
+        server {
+            listen 9123;
+            
+            location /terminal {
+                proxy_pass http://127.0.0.1:7681;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
+                proxy_set_header Host $host;
+                proxy_read_timeout 86400s;
+                proxy_send_timeout 86400s;
+            }
+            
+            location / {
+                proxy_pass http://127.0.0.1:9119;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
+                proxy_set_header Host $host;
+            }
+        }
+        EOF
+        sudo systemctl restart nginx
+        
+        echo "Starting ttyd on port 7681 with Persistent Tmux Session..."
+        nohup ttyd -b /terminal -p 7681 -c "Mario:Admin@123" tmux new -A -s nexus_term > /tmp/ttyd.log 2>&1 &
+        sleep 3
+        
     - name: Start Assigned Tunnel
       run: |
-        echo "Starting Ngrok tunnel..."
-        nohup ngrok http 9119 --log=stdout > /tmp/tunnel.log 2>&1 &
+        echo "Starting Cloudflare tunnel on Port 9123..."
+        nohup cloudflared tunnel --url http://127.0.0.1:9123 > /tmp/tunnel.log 2>&1 &
+        CF_PID=$!
         for i in $(seq 1 60); do
           sleep 2
-          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | cut -d'"' -f4 | head -1 || true)
-          if [ -n "$NGROK_URL" ]; then
-            echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
+          if ! kill -0 $CF_PID 2>/dev/null; then
+            echo -e "\e[31m[ERROR] Cloudflare process crashed! Check logs:\e[0m"
+            cat /tmp/tunnel.log
+            exit 1
+          fi
+          TUNNEL_URL=$(grep -oE "https://[a-zA-Z0-9-]+\\.trycloudflare\\.com" /tmp/tunnel.log | head -1 || true)
+          if [ -n "$TUNNEL_URL" ]; then
+            echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
             break
           fi
         done
+        if [ -z "$TUNNEL_URL" ]; then echo "Timeout waiting for Cloudflare URL"; cat /tmp/tunnel.log; exit 1; fi
         
     - name: Output Connection Details
       run: |
-        echo -e "\e[32m[SUCCESS] Native Tunnel Established!\e[0m"
+        echo -e "\e[32m[SUCCESS] Native Tunnel & Persistent Web Terminal Established!\e[0m"
         echo -e "\e[35m======================================\e[0m"
         echo -e "\e[35m    HERMES AGENT DASHBOARD ACCESS     \e[0m"
         echo -e "\e[35m======================================\e[0m"
-        echo -e "\e[36mNgrok URL      : ${{ env.NGROK_URL }}\e[0m"
-        echo -e "\e[36mUsername       : Sinket\e[0m"
+        echo -e "\e[36mDashboard URL  : ${{ env.TUNNEL_URL }}\e[0m"
+        echo -e "\e[36mTerminal URL   : ${{ env.TUNNEL_URL }}/terminal\e[0m"
+        echo -e "\e[36mUsername       : Mario\e[0m"
         echo -e "\e[36mPassword       : Admin@123\e[0m"
         echo -e "\e[36mAPI Key        : ${{ env.API_SERVER_KEY }}\e[0m"
         echo -e "\e[36mGateway Port   : 8642\e[0m"
