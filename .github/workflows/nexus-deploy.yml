@@ -28,7 +28,7 @@ jobs:
         Move-Item .\ngrok.exe C:\Windows\System32\ngrok.exe -Force
         
     - name: Configure Ngrok
-      run: ngrok authtoken 3F8T4WIYCiM1Ho32W5P1HKHVFwC_2RaPYoXzHKJiQ9CiNTvcw
+      run: ngrok authtoken 3DW8vmwVo7aYezScEd3u5oxF1MD_3UMGtriR5TAzc9wRVhNS1
       
     - name: Configure RDP
       run: |
